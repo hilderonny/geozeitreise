@@ -1,0 +1,19 @@
+{
+  "name": "history",
+  "version": "1.0.0",
+  "description": "Historische VR-Erlebnisse für Touristen und Schulen",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hilderonny/history.git"
+  },
+  "author": "Ronny Hildebrandt",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/hilderonny/history/issues"
+  },
+  "homepage": "https://github.com/hilderonny/history#readme"
+}
