@@ -9,6 +9,15 @@
             "request": "launch",
             "name": "Test heightmaps",
             "program": "${workspaceFolder}/tests/heightmaps.js"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "env": { 
+                "DBURL": "127.0.0.1:27017/geozeitreise"
+            },
+            "name": "Debug",
+            "program": "${workspaceFolder}/server/index.js"
         }
     ]
 }
