@@ -34,7 +34,7 @@ async function createImage(width, height, data, targetFile) {
         const min = data.reduce((min, val) => val < min ? val : min, data[0]);
         const png = new pngjs.PNG({ width: width, height: height, colorType: 2 });
         for (let i = 0, pixelIndex = 0; i < data.length; i++, pixelIndex += 4) {
-            const height = data[i] - min;
+            const height = data[i];
             const r = height & 0xff, g = (height >> 8) & 0xff, b = (height >> 16) & 0xff, a = 0xff;
             png.data[pixelIndex] = r;
             png.data[pixelIndex + 1] = g;

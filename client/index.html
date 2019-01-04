@@ -1,1 +1,135 @@
-geozeitreise.de
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            width: 100%;
+            height: 100%
+        }
+    </style>
+    <script src="lib/three.js"></script>
+    <script src="lib/three.orbitcontrols.js"></script>
+    <script>
+
+        function getTerrainPixelData() {
+            var img = document.getElementById("landscape-image");
+            var canvas = document.getElementById("canvas");
+
+            canvas.width = img.width;
+            canvas.height = img.height;
+            canvas.getContext('2d').drawImage(img, 0, 0, img.width, img.height);
+
+            return canvas.getContext('2d').getImageData(0, 0, img.height, img.width).data;
+        }
+
+        function loadHeightMap(url, x, y, z, width, height, numX, numY, color) {
+            return new Promise(function (resolve, reject) {
+                const image = new Image();
+                image.addEventListener('load', function () {
+
+                    const canvas = document.createElement('canvas');
+                    canvas.width = numX;
+                    canvas.height = numY;
+                    const context = canvas.getContext('2d');
+                    context.drawImage(image, 0, 0, numX, numY);
+                    const pixelData = context.getImageData(0, 0, numX, numY).data;
+
+                    var geometry = new THREE.PlaneGeometry(width, height, numX - 1, numY - 1);
+                    var material = new THREE.MeshLambertMaterial({ color: color, wireframe: false, side: THREE.DoubleSide });
+
+                    for (var i = 0, l = geometry.vertices.length; i < l; i++) {
+                        var terrainValue = pixelData[i * 4] + pixelData[i * 4 + 1] * 256 + pixelData[i * 4 + 2] * 65536;
+                        geometry.vertices[i].z = terrainValue / 100;
+                    }
+
+                    geometry.computeFaceNormals();
+                    geometry.computeVertexNormals();
+
+                    var plane = new THREE.Mesh(geometry, material);
+                    plane.rotation.x = -.5 * Math.PI;
+                    plane.position.x = x;
+                    plane.position.y = y;
+                    plane.position.z = z;
+
+                    resolve(plane);
+
+                }, false);
+                image.src = url;
+            });
+        }
+
+        window.addEventListener('load', async function () {
+
+            const easting = 644074.0233939585;
+            const northing = 5650773.33936137;
+
+            var scene = new THREE.Scene();
+            var camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 10000);
+            camera.position.y = 400;
+            camera.position.z = 1000;
+
+            var renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            var controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // an animation loop is required when either damping or auto-rotation are enabled
+            controls.dampingFactor = 0.25;
+            controls.rotateSpeed = 0.1;
+            controls.panSpeed = 0.1;
+            controls.screenSpacePanning = true; // For panning vertically
+            controls.minDistance = 1;
+            controls.maxDistance = 10000;
+            controls.keys = { LEFT: 65, UP: 87, RIGHT: 68, BOTTOM: 83 };
+
+            const pointLight = new THREE.PointLight(0xeeeeee);
+            pointLight.position.set(0, 0, 0);
+            camera.add(pointLight);
+            scene.add(camera); // Need to add camera to scene when it has childs attached
+            const ambientLight = new THREE.AmbientLight(0x222222);
+            scene.add(ambientLight);
+
+            let directory = Math.floor(easting / 1000) + '/' + Math.floor(northing / 1000);
+            let heightMap = await loadHeightMap('data/dgm/' + directory + '/heightmap.png', 0, 0, 0, 1000, 1000, 10, 10, 0xccccff, true);
+            //scene.add(heightMap);
+
+            // TODO: Das Laden eventuell in WebWorker auslagern, damit diese sukzessive nachgeladen werden, während man die Anwendung bedienen kann
+            // https://medium.com/techtrument/multithreading-javascript-46156179cf9a
+
+            // TODO: Eventuell reichen die Daten von http://data.opendataportal.at/dataset/dtm-germany bzw. https://drive.google.com/drive/folders/0BxphPoRgwhnoWkRoTFhMbTM3RDA,
+            // doch aus, da eine Meter-Auflösung doch recht unpraktikabel erscheint. Zumal die DGM-Daten doch noch etwas verfälscht sind und
+            // Gebäude erkennen lassen
+
+            for (let x = 0; x < 10; x++) {
+                for (let y = 0; y < 10; y++) {
+                    loadHeightMap('data/dgm/' + directory + '/' + x + '_' + y + '.png', x * 100, 0, y * 100, 100, 100, 100, 100, 0xccffcc).then(function(hm) {
+                        scene.add(hm);
+                    });
+                }
+            }
+
+
+            renderer.setAnimationLoop(function () {
+                controls.update();
+                renderer.render(scene, camera);
+            });
+
+        });
+
+    </script>
+</head>
+
+<body>
+    <img src="data/dgm/644/5650/heightmap.png" id="landscape-image" style="display:none;" />
+    <canvas id="canvas" style="display:none"></canvas>
+</body>
+
+</html>
