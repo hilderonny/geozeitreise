@@ -1,121 +1,170 @@
 const coordinates = require('../server/coordinates');
 const fs = require('fs');
 const byline = require('byline');
-const jpegjs = require('jpeg-js');
+const path = require('path');
 const pngjs = require('pngjs');
-const pureimage = require('pureimage');
 const request = require('request');
-const sharp = require('sharp');
 const unzip = require('unzip');
 
-const dgmPath = __dirname + '/../server/data/dgm/';
-console.log(dgmPath);
+const dgmPath = path.join(__dirname, '../client/data/dgm/');
+
+/**
+ * Die Zeilen in einer xyz-Datei sehen so aus:
+ * 644001.00 5650999.00 190.24
+ * Dabei sind zuerst die eastings in der ersten Spalte aufsteigend sortiert.
+ * Danach die northings in der zweiten Spalte ABSTEIGEND.
+ * Die letzte Spalte stellt den Höhenert dar. Also:
+ * 644000.00 5650999.00 190.24
+ * 644001.00 5650999.00 190.24
+ * ...
+ * 644999.00 5650999.00 190.24
+ * 644000.00 5650998.00 190.24
+ * 644001.00 5650998.00 190.24
+ * ...
+ * 644999.00 5650001.00 190.24
+ * 644000.00 5650000.00 190.24
+ * 644001.00 5650000.00 190.24
+ * ...
+ * 644999.00 5650000.00 190.24
+ * Jede Datei hat also stets 1.000 * 1.000 = 1.000.000 Einträge
+ */
+
+async function createImage(width, height, data, targetFile) {
+    return new Promise(function(resolve, reject) {
+        const min = data.reduce((min, val) => val < min ? val : min, data[0]);
+        const png = new pngjs.PNG({ width: width, height: height, colorType: 2 });
+        for (let i = 0, pixelIndex = 0; i < data.length; i++, pixelIndex += 4) {
+            const height = data[i] - min;
+            const r = height & 0xff, g = (height >> 8) & 0xff, b = (height >> 16) & 0xff, a = 0xff;
+            png.data[pixelIndex] = r;
+            png.data[pixelIndex + 1] = g;
+            png.data[pixelIndex + 2] = b
+            png.data[pixelIndex + 3] = a;
+        }
+        png.pack().pipe(fs.createWriteStream(targetFile)).on('close', function () {
+            resolve(min);
+        });
+    });
+}
+
+async function createHeightMaps(coordinates) {
+    console.log('Generating heightmaps ...');
+    return new Promise(function (resolve, reject) {
+        let index = 0, index2 = 0, chunkY = 0, chunkX = 0;
+        const chunks = [];
+        for (let i = 0; i < 10; i++) {
+            const chunk = [];
+            chunks.push(chunk);
+            for (let j = 0; j < 10; j++) chunk.push([]);
+        }
+        const fileStream = fs.createReadStream(coordinates.xyzFile);
+        fileStream.on('close', async function () {
+            const heightMapData = [];
+            for (let i = 0; i < 10; i++) {
+                for (let j = 0; j < 10; j++) {
+                    const targetFile = path.join(coordinates.directory, i + '_' + j + '.png')
+                    const min = await createImage(100, 100, chunks[i][j], targetFile);
+                    heightMapData.push(min);
+                }
+            }
+            await createImage(10, 10, heightMapData, coordinates.overviewHeightmap);
+            resolve();
+        });
+        const lineStream = byline.createStream(fileStream);
+        lineStream.on('data', function (line) {
+            if (index > 99) {
+                chunkX++;
+                if (chunkX > 9) {
+                    index2++;
+                    if (index2 > 99) {
+                        chunkY++;
+                        index2 = 0;
+                    }
+                    chunkX = 0;
+                }
+                index = 0;
+            }
+            const lineString = line.toString();
+            if (!lineString) return;
+            const lineParts = lineString.split(' ');
+            if (lineParts.length < 3) return;
+            const height = parseInt(lineParts[2].replace('.', '')); // Height in centimeters
+            chunks[chunkX][chunkY].push(height);
+            index++;
+        });
+    });
+}
+
+function downloadFromUrl(url, targetFile) {
+    return new Promise(function (resolve, reject) {
+        const fileStream = fs.createWriteStream(targetFile);
+        fileStream.on('close', function () {
+            resolve();
+        });
+        request(url).pipe(fileStream);
+    });
+}
+
+async function downloadZipFile(bbox, targetFile) {
+    console.log('Fetching overview ...');
+    const overviewUrl = 'https://geoportal.geoportal-th.de/gaialight-th/_apps/dladownload/_ajax/overview.php?bbox%5B%5D=' + bbox[0] + '&bbox%5B%5D=' + bbox[1] + '&bbox%5B%5D=' + bbox[2] + '&bbox%5B%5D=' + bbox[3] + '&crs=EPSG%3A25832&type%5B%5D=dhm1';
+    const overview = await getJson(overviewUrl);
+    var features = overview.result.features;
+    for (let i = 0; i < features.length; i++) {
+        const feature = features[i];
+        const detailsUrl = 'https://geoportal.geoportal-th.de/gaialight-th/_apps/dladownload/_ajax/details.php?type=dhm1&id=' + feature.properties.gid;
+        const details = await getJson(detailsUrl);
+        const dgmUrl = 'https://geoportal.geoportal-th.de' + details.object.file1;
+        console.log('Downloading ' + dgmUrl + ' ...');
+        await downloadFromUrl(dgmUrl, targetFile);
+    }
+}
+
+function extractXYZFile(zipFilePath, targetFile) {
+    console.log('Extracting ' + zipFilePath + ' ...');
+    return new Promise(function (resolve, reject) {
+        fs.createReadStream(zipFilePath).pipe(unzip.Parse()).on('entry', function (entry) {
+            const fileName = entry.path;
+            if (!fileName.endsWith('.xyz')) return entry.autodrain;
+            const fileStream = fs.createWriteStream(targetFile);
+            fileStream.on('close', function () {
+                resolve();
+            });
+            entry.pipe(fileStream);
+        });
+    });
+}
+
+function getCoordinates(latitude, longitude, basePath) {
+    const utmCoordinates = coordinates.fromLatLon(latitude, longitude);
+    const easting = Math.floor(utmCoordinates.easting);
+    const northing = Math.floor(utmCoordinates.northing);
+    const directory = path.join(basePath, Math.floor(easting / 1000).toString(), Math.floor(northing / 1000).toString());
+    return {
+        easting: utmCoordinates.easting,
+        northing: utmCoordinates.northing,
+        bbox: [easting, northing, easting + 1, northing + 1],
+        directory: directory,
+        zipFile: path.join(directory, 'dgm.zip'),
+        xyzFile: path.join(directory, 'dgm.xyz'),
+        overviewHeightmap: path.join(directory, 'heightmap.png'), // Overview heightmap for 1 square kilometer with resolution of 10 meters
+    }
+}
 
 function getJson(url) {
-    return new Promise(function(resolve, reject) {
-        request(url, function(error, response, body) {
+    return new Promise(function (resolve, reject) {
+        request(url, function (error, response, body) {
             const json = JSON.parse(body);
             resolve(json);
         });
     });
 }
 
-function downloadAndExtract(url, destination) {
-    return new Promise(function(resolve, reject) {
-        const heightArray = [];//new Int32Array(1000 * 1000 * 4);
-        //const bitmap = pureimage.make(1000, 1000);
-        /**
-         * Am sinnvollsten ist es immernoch, die Daten als 24-Bit PNG-Datei zu speichern.
-         * Damit ist so ein Bereich von 1kmx1km etwa 1 MB groß. Wenn man als JPEG speichert,
-         * muss man mit 100% Qualität speichern, was die Datei auf 1,7 MB aufbläht. Andernfalls
-         * hätte man Genauigkeitsverluste.
-         * 
-         * TODO: Die Chunks sind zu groß. Sowohl die Datei von 1 MB als auch die PlaneGeometry
-         * später in der Anzeige von 1000 * 1000 sind nicht performant handhabbar.
-         */
-        const png = new pngjs.PNG({ width: 1000, height: 1000, colorType: 2 });
-        const jpegBuffer = new Buffer(1000 * 1000 * 4);
-        request(url).pipe(unzip.Parse()).on('entry', function(entry) {
-            const fileName = entry.path;
-            if (!fileName.endsWith('.xyz')) return entry.autodrain;
-            console.log('Verarbeite: ' + fileName);
-            const lineStream = byline.createStream();
-            let pixelIndex = 0;
-            lineStream.on('data', function(line) {
-                const lineString = line.toString();
-                if (!lineString) return;
-                const lineParts = lineString.split(' ');
-                if (lineParts.length < 3) return;
-                const height = parseInt(lineParts[2].replace('.', ''));
-                heightArray.push(height);
-                const r = height & 0xff, g = (height >> 8) & 0xff, b = (height >> 16) & 0xff, a = 0xff;
-                png.data[pixelIndex] = r;
-                png.data[pixelIndex + 1] = g;
-                png.data[pixelIndex + 2] = b
-                png.data[pixelIndex + 3] = a;
-                jpegBuffer[pixelIndex] = r;
-                jpegBuffer[pixelIndex + 1] = g;
-                jpegBuffer[pixelIndex + 2] = b
-                jpegBuffer[pixelIndex + 3] = a;
-                
-                /**
-                 * Die Zeilen sehen so aus:
-                 * 644001.00 5650999.00 190.24
-                 * Dabei sind zuerst die eastings in der ersten Spalte aufsteigend sortiert.
-                 * Danach die northings in der zweiten Spalte ABSTEIGEND.
-                 * Die letzte Spalte stellt den Höhenert dar. Also:
-                 * 644000.00 5650999.00 190.24
-                 * 644001.00 5650999.00 190.24
-                 * ...
-                 * 644999.00 5650999.00 190.24
-                 * 644000.00 5650998.00 190.24
-                 * 644001.00 5650998.00 190.24
-                 * ...
-                 * 644999.00 5650001.00 190.24
-                 * 644000.00 5650000.00 190.24
-                 * 644001.00 5650000.00 190.24
-                 * ...
-                 * 644999.00 5650000.00 190.24
-                 * Jede Datei hat also stets 1.000 * 1.000 = 1.000.000 Einträge
-                 */
-                pixelIndex += 4;
-            });
-            entry.pipe(lineStream);
-        }).on('close', function() {
-            const buffer = new Buffer(heightArray);
-            console.log(buffer.byteLength);
-            // Hier haben wir die Rohdaten und speichern diese erst mal ab
-            const binFileName = destination + 'height.dat';
-            console.log('Speichere Datei: ' + binFileName);
-            fs.writeFileSync(binFileName, buffer);
-            const pngFileName = destination + 'height.png';
-            console.log('Speichere PNG: ' + pngFileName);
-            png.pack().pipe(fs.createWriteStream(pngFileName)).on('close', function() {
-                resolve(destination);
-                const jpgFileName = destination + 'height.jpg';
-                console.log('Speichere JPG: ' + jpgFileName);
-                fs.writeFileSync(jpgFileName, jpegjs.encode({ data: jpegBuffer, width: 1000, height: 1000 }, 95).data);
-                resolve(destination);
-            });
-            /*
-            pureimage.encodePNGToStream(bitmap, fs.createWriteStream(pngFileName)).then(function() {
-                const jpgFileName = destination + 'height.jpg';
-                console.log('Speichere JPG: ' + jpgFileName);
-                return pureimage.encodeJPEGToStream(bitmap, fs.createWriteStream(jpgFileName));
-            }).then(function() {
-                resolve(destination);
-            });
-            // Jetzt noch die Daten als PNG speichern
-            // Dafür gibt es die Bibliotheken "sharp" (Mit nativen Abhängigkeiten) und "pureimage"
-            /*
-            const image = sharp(buffer, {
-                raw: { width: 1000, height: 1000, channels: 3 }
-            });
-            image.png().toFile(destination + 'heights.png');
-            image.jpeg({ quality: 100 }).toFile(destination + 'heights.jpg');
-            */
-        });
-    });
+function prepareDirectory(directory) {
+    if (!fs.existsSync(directory)) {
+        prepareDirectory(path.dirname(directory));
+        fs.mkdirSync(directory);
+    }
 }
 
 /**
@@ -127,44 +176,31 @@ function downloadAndExtract(url, destination) {
  * wo die Höhendaten von ganz Europa zu finden sind. Dort ist die Auflösung aber nur 20m-30m.
  */
 
- (async function() {
+(async function () {
 
     // Koordinaten festlegen, wie sie aus GPS Receivers kämen
     const latitude = 50.9904901;
     const longitude = 11.0528969;
-    console.log('Latitude: ' + latitude + ', Longitude: ' + longitude);
 
     // Koordinaten ins UTM-Format umwandeln
-    const utmCoordinates = coordinates.fromLatLon(latitude, longitude);
-    const areaKey = { 
-        easting: Math.floor(utmCoordinates.easting / 1000),
-        northing: Math.floor(utmCoordinates.northing / 1000)
-    };
-    console.log(utmCoordinates.zoneLetter + utmCoordinates.zoneNum + ': ' + utmCoordinates.easting + ' Ost, ' + utmCoordinates.northing + ' Nord, Schlüssel: ' + areaKey.easting + '/' + areaKey.northing);
+    const coordinates = getCoordinates(latitude, longitude, dgmPath);
 
-    // Prüfen, ob bereits DGM-Daten herunter geladen wurden
-    const eastingPath = dgmPath + areaKey.easting + '/';
-    const northingPath = eastingPath + areaKey.northing + '/';
-    if (!fs.existsSync(eastingPath)) fs.mkdirSync(eastingPath);
-    if (!fs.existsSync(northingPath)) fs.mkdirSync(northingPath);
-    // Übersicht laden, wo die einzelnen Kacheln vermerkt sind
-    // https://geoportal.geoportal-th.de/gaialight-th/_apps/dladownload/_ajax/overview.php?bbox%5B%5D=644074&bbox%5B%5D=5650773&bbox%5B%5D=644075&bbox%5B%5D=5650774&crs=EPSG%3A25832&type%5B%5D=dhm1
-    const overviewUrl = 'https://geoportal.geoportal-th.de/gaialight-th/_apps/dladownload/_ajax/overview.php?bbox%5B%5D=' + Math.floor(utmCoordinates.easting) + '&bbox%5B%5D=' + Math.floor(utmCoordinates.northing) + '&bbox%5B%5D=' + Math.ceil(utmCoordinates.easting) + '&bbox%5B%5D=' + Math.ceil(utmCoordinates.northing) + '&crs=EPSG%3A25832&type%5B%5D=dhm1';
-    const overview = await getJson(overviewUrl);
-    console.log('Anzahl Kacheln: ' + overview.result.features.length);
+    // Datenpfad vorbereiten
+    prepareDirectory(coordinates.directory);
 
-    overview.result.features.forEach(async function(feature) {
-        const bounding = {
-            east: feature.geometry.coordinates[0][0][0][0],
-            north: feature.geometry.coordinates[0][0][1][1],
-            south: feature.geometry.coordinates[0][0][0][1],
-            west: feature.geometry.coordinates[0][0][2][0],
-        };
-        const detailsUrl = 'https://geoportal.geoportal-th.de/gaialight-th/_apps/dladownload/_ajax/details.php?type=dhm1&id=' + feature.properties.gid;
-        const details = await getJson(detailsUrl);
-        const dgmUrl = 'https://geoportal.geoportal-th.de' + details.object.file1;
-        console.log('Lade herunter: ' + dgmUrl);
-        await downloadAndExtract(dgmUrl, northingPath);
-    });
+    // Prüfen, ob DGM-ZIP-Datei bereits vorhanden ist und ggf herunterladen
+    if (!fs.existsSync(coordinates.zipFile)) {
+        await downloadZipFile(coordinates.bbox, coordinates.zipFile);
+    }
+
+    // Prüfen, ob XYZ-Datei vorhanden ist und ggf. extrahieren
+    if (!fs.existsSync(coordinates.xyzFile)) {
+        await extractXYZFile(coordinates.zipFile, coordinates.xyzFile);
+    }
+
+    // Prüfen, ob Übersichts-Heightmap erzeugt wurde und ggf. alle Heightmaps erstellen
+    if (!fs.existsSync(coordinates.overviewHeightmap)) {
+        await createHeightMaps(coordinates);
+    }
 
 })();

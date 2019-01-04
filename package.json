@@ -19,13 +19,10 @@
     "byline": "^5.0.0",
     "compression": "^1.7.3",
     "express": "^4.16.4",
-    "jpeg-js": "^0.3.4",
     "jsonwebtoken": "^8.4.0",
     "monk": "^6.0.6",
     "pngjs": "^3.3.3",
-    "pureimage": "^0.1.6",
     "request": "^2.88.0",
-    "sharp": "^0.21.1",
     "unzip": "^0.1.11"
   }
 }
